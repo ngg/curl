@@ -2064,6 +2064,26 @@ CURLcode Curl_setopt(struct SessionHandle *data, CURLoption option,
     result = CURLE_NOT_BUILT_IN;
 #endif
     break;
+  case CURLOPT_SSL_SESSION_FUNCTION:
+#ifdef have_curlssl_ssl_ctx
+    /*
+     * Set a SSL_SESSION callback
+     */
+    data->set.ssl.fsslsession = va_arg(param, curl_ssl_session_callback);
+#else
+    result = CURLE_NOT_BUILT_IN;
+#endif
+    break;
+  case CURLOPT_SSL_SESSION_DATA:
+#ifdef have_curlssl_ssl_ctx
+    /*
+     * Set a SSL_SESSION callback parameter pointer
+     */
+    data->set.ssl.fsslsessionp = va_arg(param, void *);
+#else
+    result = CURLE_NOT_BUILT_IN;
+#endif
+    break;
   case CURLOPT_SSL_FALSESTART:
     /*
      * Enable TLS false start.

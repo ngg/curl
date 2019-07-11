@@ -617,6 +617,11 @@ typedef CURLcode (*curl_ssl_ctx_callback)(CURL *curl,    /* easy handle */
                                                             OpenSSL SSL_CTX */
                                           void *userptr);
 
+typedef CURLcode (*curl_ssl_session_callback)(CURL *curl,    /* easy handle */
+                                          void *ssl_session, /* actually an
+                                                            OpenSSL SSL_SESSION */
+                                          void *userptr);
+
 typedef enum {
   CURLPROXY_HTTP = 0,   /* added in 7.10, new in 7.19.4 default is to use
                            CONNECT HTTP/1.1 */
@@ -1292,8 +1297,18 @@ typedef enum {
 
   /* 122 OBSOLETE, used in 7.12.3. Gone in 7.13.0 */
   /* 123 OBSOLETE. Gone in 7.16.0 */
-  /* 124 OBSOLETE, used in 7.12.3. Gone in 7.13.0 */
+
+  /* 124 OBSOLETE, used in 7.12.3. Gone in 7.13.0. Ugly hack for session function (NGG) */
+  /* Set the ssl session callback function, currently only for OpenSSL ssl_session
+     in second argument. The function must be matching the
+     curl_ssl_session_callback proto. */
+  CINIT(SSL_SESSION_FUNCTION, FUNCTIONPOINT, 124),
+
   /* 125 OBSOLETE, used in 7.12.3. Gone in 7.13.0 */
+  /* Set the userdata for the ssl session callback function's third
+     argument */
+  CINIT(SSL_SESSION_DATA, OBJECTPOINT, 125),
+
   /* 126 OBSOLETE, used in 7.12.3. Gone in 7.13.0 */
   /* 127 OBSOLETE. Gone in 7.16.0 */
   /* 128 OBSOLETE. Gone in 7.16.0 */

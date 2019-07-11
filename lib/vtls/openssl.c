@@ -162,6 +162,13 @@ static int passwd_callback(char *buf, int num, int encrypting,
  * pass in an argument that is never used.
  */
 
+/*
+ * OpenSSL doesn't need seeding...
+ */
+#ifndef NO_RAND_SEED
+#define NO_RAND_SEED 1
+#endif
+
 #ifndef NO_RAND_SEED
 #ifdef HAVE_RAND_STATUS
 #define seed_enough(x) rand_enough()
@@ -328,6 +335,7 @@ static int ssl_ui_writer(UI *ui, UI_STRING *uis)
 }
 #endif
 
+#ifndef OPENSSL_NO_FP_API
 static
 int cert_stuff(struct connectdata *conn,
                SSL_CTX* ctx,
@@ -637,6 +645,7 @@ int cert_stuff(struct connectdata *conn,
   }
   return 1;
 }
+#endif
 
 /* returns non-zero on failure */
 static int x509_name_oneline(X509_NAME *a, char *buf, size_t size)
@@ -705,9 +714,11 @@ int Curl_ossl_init(void)
 #define CONF_MFLAGS_DEFAULT_SECTION 0x0
 #endif
 
+#ifndef OPENSSL_NO_FP_API
   CONF_modules_load_file(NULL, NULL,
                          CONF_MFLAGS_DEFAULT_SECTION|
                          CONF_MFLAGS_IGNORE_MISSING_FILE);
+#endif
 
   /* Lets get nice error messages */
   SSL_load_error_strings();
@@ -1869,6 +1880,7 @@ static CURLcode ossl_connect_step1(struct connectdata *conn, int sockindex)
   }
 #endif
 
+#ifndef OPENSSL_NO_FP_API
   if(data->set.str[STRING_CERT] || data->set.str[STRING_CERT_TYPE]) {
     if(!cert_stuff(conn,
                    connssl->ctx,
@@ -1880,6 +1892,7 @@ static CURLcode ossl_connect_step1(struct connectdata *conn, int sockindex)
       return CURLE_SSL_CERTPROBLEM;
     }
   }
+#endif
 
   ciphers = data->set.str[STRING_SSL_CIPHER_LIST];
   if(!ciphers)
@@ -1912,6 +1925,7 @@ static CURLcode ossl_connect_step1(struct connectdata *conn, int sockindex)
     }
   }
 #endif
+#ifndef OPENSSL_NO_FP_API
   if(data->set.str[STRING_SSL_CAFILE] || data->set.str[STRING_SSL_CAPATH]) {
     /* tell SSL where to find CA certificates that are used to verify
        the servers certificate. */
@@ -1970,6 +1984,7 @@ static CURLcode ossl_connect_step1(struct connectdata *conn, int sockindex)
           "  CRLfile: %s\n", data->set.str[STRING_SSL_CRLFILE] ?
           data->set.str[STRING_SSL_CRLFILE]: "none");
   }
+#endif
 
   /* Try building a chain using issuers in the trusted store first to avoid
   problems with server-sent legacy intermediates.
@@ -2544,6 +2559,7 @@ static CURLcode servercert(struct connectdata *conn,
     /* We could do all sorts of certificate verification stuff here before
        deallocating the certificate. */
 
+#ifndef OPENSSL_NO_FP_API
     /* e.g. match issuer name with provided issuer certificate */
     if(data->set.str[STRING_SSL_ISSUERCERT]) {
       fp = fopen(data->set.str[STRING_SSL_ISSUERCERT], FOPEN_READTEXT);
@@ -2583,6 +2599,7 @@ static CURLcode servercert(struct connectdata *conn,
             data->set.str[STRING_SSL_ISSUERCERT]);
       X509_free(issuer);
     }
+#endif
 
     lerr = data->set.ssl.certverifyresult =
       SSL_get_verify_result(connssl->handle);
@@ -2667,6 +2684,16 @@ static CURLcode ossl_connect_step3(struct connectdata *conn, int sockindex)
     if(result) {
       failf(data, "failed to store ssl session");
       return result;
+    }
+
+    /* give application a chance to interfere with the new SSL sessions. */
+    if(data->set.ssl.fsslsession) {
+      result = (*data->set.ssl.fsslsession)(data, our_ssl_sessionid,
+                                        data->set.ssl.fsslsessionp);
+      if(result) {
+        failf(data,"error signaled by ssl session callback");
+        return result;
+      }
     }
   }
   else {
