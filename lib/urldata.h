@@ -361,6 +361,8 @@ struct ssl_config_data {
   size_t max_ssl_sessions; /* SSL session id cache size */
   curl_ssl_ctx_callback fsslctx; /* function to initialize ssl ctx */
   void *fsslctxp;        /* parameter for call back */
+  curl_ssl_session_callback fsslsession; /* function to call with every new session */
+  void *fsslsessionp;        /* parameter for call back */
   bool sessionid;        /* cache session IDs or not */
   bool certinfo;         /* gather lots of certificate info */
   bool falsestart;
