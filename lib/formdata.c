@@ -5,11 +5,11 @@
  *                            | (__| |_| |  _ <| |___
  *                             \___|\___/|_| \_\_____|
  *
- * Copyright (C) 1998 - 2015, Daniel Stenberg, <daniel@haxx.se>, et al.
+ * Copyright (C) 1998 - 2016, Daniel Stenberg, <daniel@haxx.se>, et al.
  *
  * This software is licensed as described in the file COPYING, which
  * you should have received as part of this distribution. The terms
- * are also available at http://curl.haxx.se/docs/copyright.html.
+ * are also available at https://curl.haxx.se/docs/copyright.html.
  *
  * You may opt to use, copy, modify, merge, publish, distribute and/or sell
  * copies of the Software, and permit persons to whom the Software is
@@ -387,7 +387,7 @@ CURLFORMcode FormAdd(struct curl_httppost **httppost,
     case CURLFORM_CONTENTLEN:
       current_form->flags |= CURL_HTTPPOST_LARGE;
       current_form->contentslength =
-        array_state?(curl_off_t)array_value:va_arg(params, curl_off_t);
+        array_state?(curl_off_t)(size_t)array_value:va_arg(params, curl_off_t);
       break;
 
       /* Get contents from a given file name */
@@ -825,7 +825,13 @@ static CURLcode AddFormData(struct FormData **formp,
                             curl_off_t length,
                             curl_off_t *size)
 {
-  struct FormData *newform = malloc(sizeof(struct FormData));
+  struct FormData *newform;
+  char *alloc2 = NULL;
+  CURLcode result = CURLE_OK;
+  if(length < 0 || (size && *size < 0))
+    return CURLE_BAD_FUNCTION_ARGUMENT;
+
+  newform = malloc(sizeof(struct FormData));
   if(!newform)
     return CURLE_OUT_OF_MEMORY;
   newform->next = NULL;
@@ -834,15 +840,22 @@ static CURLcode AddFormData(struct FormData **formp,
     /* we make it easier for plain strings: */
     if(!length)
       length = strlen((char *)line);
-
-    newform->line = malloc(length+1);
-    if(!newform->line) {
-      free(newform);
-      return CURLE_OUT_OF_MEMORY;
+#if (SIZEOF_SIZE_T < CURL_SIZEOF_CURL_OFF_T)
+    else if(length >= (curl_off_t)(size_t)-1) {
+      result = CURLE_BAD_FUNCTION_ARGUMENT;
+      goto error;
     }
-    memcpy(newform->line, line, length);
-    newform->length = length;
-    newform->line[length]=0; /* zero terminate for easier debugging */
+#endif
+
+    newform->line = malloc((size_t)length+1);
+    if(!newform->line) {
+      result = CURLE_OUT_OF_MEMORY;
+      goto error;
+    }
+    alloc2 = newform->line;
+    memcpy(newform->line, line, (size_t)length);
+    newform->length = (size_t)length;
+    newform->line[(size_t)length]=0; /* zero terminate for easier debugging */
   }
   else
     /* For callbacks and files we don't have any actual data so we just keep a
@@ -870,12 +883,20 @@ static CURLcode AddFormData(struct FormData **formp,
         struct_stat file;
         if(!stat(newform->line, &file) && !S_ISDIR(file.st_mode))
           *size += filesize(newform->line, file);
-        else
-          return CURLE_BAD_FUNCTION_ARGUMENT;
+        else {
+          result = CURLE_BAD_FUNCTION_ARGUMENT;
+          goto error;
+        }
       }
     }
   }
   return CURLE_OK;
+  error:
+  if(newform)
+    free(newform);
+  if(alloc2)
+    free(alloc2);
+  return result;
 }
 
 /*

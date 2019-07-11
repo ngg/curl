@@ -6,11 +6,11 @@
  *                             \___|\___/|_| \_\_____|
  *
  * Copyright (C) 2010 - 2011, Hoi-Ho Chan, <hoiho.chan@gmail.com>
- * Copyright (C) 2012 - 2015, Daniel Stenberg, <daniel@haxx.se>, et al.
+ * Copyright (C) 2012 - 2016, Daniel Stenberg, <daniel@haxx.se>, et al.
  *
  * This software is licensed as described in the file COPYING, which
  * you should have received as part of this distribution. The terms
- * are also available at http://curl.haxx.se/docs/copyright.html.
+ * are also available at https://curl.haxx.se/docs/copyright.html.
  *
  * You may opt to use, copy, modify, merge, publish, distribute and/or sell
  * copies of the Software, and permit persons to whom the Software is
@@ -40,6 +40,7 @@
 #include <mbedtls/error.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
+#include <mbedtls/sha256.h>
 
 #include "urldata.h"
 #include "sendf.h"
@@ -129,24 +130,33 @@ static void mbedtls_debug(void *context, int level, const char *line)
  */
 const mbedtls_x509_crt_profile mbedtls_x509_crt_profile_fr =
 {
-    /* Hashes from SHA-1 and above */
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA1 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_RIPEMD160 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA224 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA256 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA384 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA512 ),
-    0xFFFFFFF, /* Any PK alg    */
-    0xFFFFFFF, /* Any curve     */
-    1024,      /* RSA min key len */
+  /* Hashes from SHA-1 and above */
+  MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA1 ) |
+  MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_RIPEMD160 ) |
+  MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA224 ) |
+  MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA256 ) |
+  MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA384 ) |
+  MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA512 ),
+  0xFFFFFFF, /* Any PK alg    */
+  0xFFFFFFF, /* Any curve     */
+  1024,      /* RSA min key len */
 };
+
+/* See https://tls.mbed.org/discussions/generic/
+   howto-determine-exact-buffer-len-for-mbedtls_pk_write_pubkey_der
+*/
+#define RSA_PUB_DER_MAX_BYTES   (38 + 2 * MBEDTLS_MPI_MAX_SIZE)
+#define ECP_PUB_DER_MAX_BYTES   (30 + 2 * MBEDTLS_ECP_MAX_BYTES)
+
+#define PUB_DER_MAX_BYTES   (RSA_PUB_DER_MAX_BYTES > ECP_PUB_DER_MAX_BYTES ? \
+                             RSA_PUB_DER_MAX_BYTES : ECP_PUB_DER_MAX_BYTES)
 
 static Curl_recv mbedtls_recv;
 static Curl_send mbedtls_send;
 
 static CURLcode
 mbedtls_connect_step1(struct connectdata *conn,
-                     int sockindex)
+                      int sockindex)
 {
   struct SessionHandle *data = conn->data;
   struct ssl_connect_data* connssl = &conn->ssl[sockindex];
@@ -202,7 +212,7 @@ mbedtls_connect_step1(struct connectdata *conn,
 #endif /* THREADING_SUPPORT */
 
   /* Load the trusted CA */
-  memset(&connssl->cacert, 0, sizeof(mbedtls_x509_crt));
+  mbedtls_x509_crt_init(&connssl->cacert);
 
   if(data->set.str[STRING_SSL_CAFILE]) {
     ret = mbedtls_x509_crt_parse_file(&connssl->cacert,
@@ -237,7 +247,7 @@ mbedtls_connect_step1(struct connectdata *conn,
   }
 
   /* Load the client certificate */
-  memset(&connssl->clicert, 0, sizeof(mbedtls_x509_crt));
+  mbedtls_x509_crt_init(&connssl->clicert);
 
   if(data->set.str[STRING_CERT]) {
     ret = mbedtls_x509_crt_parse_file(&connssl->clicert,
@@ -255,8 +265,9 @@ mbedtls_connect_step1(struct connectdata *conn,
   }
 
   /* Load the client private key */
+  mbedtls_pk_init(&connssl->pk);
+
   if(data->set.str[STRING_KEY]) {
-    mbedtls_pk_init(&connssl->pk);
     ret = mbedtls_pk_parse_keyfile(&connssl->pk, data->set.str[STRING_KEY],
                                    data->set.str[STRING_KEY_PASSWD]);
     if(ret == 0 && !mbedtls_pk_can_do(&connssl->pk, MBEDTLS_PK_RSA))
@@ -274,11 +285,11 @@ mbedtls_connect_step1(struct connectdata *conn,
   }
 
   /* Load the CRL */
-  memset(&connssl->crl, 0, sizeof(mbedtls_x509_crl));
+  mbedtls_x509_crl_init(&connssl->crl);
 
   if(data->set.str[STRING_SSL_CRLFILE]) {
     ret = mbedtls_x509_crl_parse_file(&connssl->crl,
-                              data->set.str[STRING_SSL_CRLFILE]);
+                                      data->set.str[STRING_SSL_CRLFILE]);
 
     if(ret) {
 #ifdef MBEDTLS_ERROR_C
@@ -315,36 +326,53 @@ mbedtls_connect_step1(struct connectdata *conn,
                                  &mbedtls_x509_crt_profile_fr);
 
   switch(data->set.ssl.version) {
+  case CURL_SSLVERSION_DEFAULT:
+  case CURL_SSLVERSION_TLSv1:
+    mbedtls_ssl_conf_min_version(&connssl->config, MBEDTLS_SSL_MAJOR_VERSION_3,
+                                 MBEDTLS_SSL_MINOR_VERSION_1);
+    infof(data, "mbedTLS: Set min SSL version to TLS 1.0\n");
+    break;
   case CURL_SSLVERSION_SSLv3:
     mbedtls_ssl_conf_min_version(&connssl->config, MBEDTLS_SSL_MAJOR_VERSION_3,
                                  MBEDTLS_SSL_MINOR_VERSION_0);
-    infof(data, "mbedTLS: Forced min. SSL Version to be SSLv3\n");
+    mbedtls_ssl_conf_max_version(&connssl->config, MBEDTLS_SSL_MAJOR_VERSION_3,
+                                 MBEDTLS_SSL_MINOR_VERSION_0);
+    infof(data, "mbedTLS: Set SSL version to SSLv3\n");
     break;
   case CURL_SSLVERSION_TLSv1_0:
     mbedtls_ssl_conf_min_version(&connssl->config, MBEDTLS_SSL_MAJOR_VERSION_3,
                                  MBEDTLS_SSL_MINOR_VERSION_1);
-    infof(data, "mbedTLS: Forced min. SSL Version to be TLS 1.0\n");
+    mbedtls_ssl_conf_max_version(&connssl->config, MBEDTLS_SSL_MAJOR_VERSION_3,
+                                 MBEDTLS_SSL_MINOR_VERSION_1);
+    infof(data, "mbedTLS: Set SSL version to TLS 1.0\n");
     break;
   case CURL_SSLVERSION_TLSv1_1:
     mbedtls_ssl_conf_min_version(&connssl->config, MBEDTLS_SSL_MAJOR_VERSION_3,
                                  MBEDTLS_SSL_MINOR_VERSION_2);
-    infof(data, "mbedTLS: Forced min. SSL Version to be TLS 1.1\n");
+    mbedtls_ssl_conf_max_version(&connssl->config, MBEDTLS_SSL_MAJOR_VERSION_3,
+                                 MBEDTLS_SSL_MINOR_VERSION_2);
+    infof(data, "mbedTLS: Set SSL version to TLS 1.1\n");
     break;
   case CURL_SSLVERSION_TLSv1_2:
     mbedtls_ssl_conf_min_version(&connssl->config, MBEDTLS_SSL_MAJOR_VERSION_3,
                                  MBEDTLS_SSL_MINOR_VERSION_3);
-    infof(data, "mbedTLS: Forced min. SSL Version to be TLS 1.2\n");
+    mbedtls_ssl_conf_max_version(&connssl->config, MBEDTLS_SSL_MAJOR_VERSION_3,
+                                 MBEDTLS_SSL_MINOR_VERSION_3);
+    infof(data, "mbedTLS: Set SSL version to TLS 1.2\n");
     break;
+  default:
+    failf(data, "mbedTLS: Unsupported SSL protocol version");
+    return CURLE_SSL_CONNECT_ERROR;
   }
 
   mbedtls_ssl_conf_authmode(&connssl->config, MBEDTLS_SSL_VERIFY_OPTIONAL);
 
   mbedtls_ssl_conf_rng(&connssl->config, mbedtls_ctr_drbg_random,
-              &connssl->ctr_drbg);
+                       &connssl->ctr_drbg);
   mbedtls_ssl_set_bio(&connssl->ssl, &conn->sock[sockindex],
-              mbedtls_net_send,
-              mbedtls_net_recv,
-              NULL /*  rev_timeout() */);
+                      mbedtls_net_send,
+                      mbedtls_net_recv,
+                      NULL /*  rev_timeout() */);
 
   mbedtls_ssl_conf_ciphersuites(&connssl->config,
                                 mbedtls_ssl_list_ciphersuites());
@@ -354,35 +382,43 @@ mbedtls_connect_step1(struct connectdata *conn,
   }
 
   mbedtls_ssl_set_session(&connssl->ssl,
-                  &connssl->ssn);
+                          &connssl->ssn);
 
   mbedtls_ssl_conf_ca_chain(&connssl->config,
-                   &connssl->cacert,
-                   &connssl->crl);
+                            &connssl->cacert,
+                            &connssl->crl);
 
   if(data->set.str[STRING_KEY]) {
     mbedtls_ssl_conf_own_cert(&connssl->config,
-                         &connssl->clicert, &connssl->pk);
+                              &connssl->clicert, &connssl->pk);
   }
   if(!Curl_inet_pton(AF_INET, conn->host.name, &addr) &&
 #ifdef ENABLE_IPV6
      !Curl_inet_pton(AF_INET6, conn->host.name, &addr) &&
 #endif
      sni && mbedtls_ssl_set_hostname(&connssl->ssl, conn->host.name)) {
-     infof(data, "WARNING: failed to configure "
-                 "server name indication (SNI) TLS extension\n");
+    infof(data, "WARNING: failed to configure "
+          "server name indication (SNI) TLS extension\n");
   }
 
 #ifdef HAS_ALPN
-  if(data->set.httpversion == CURL_HTTP_VERSION_2_0) {
-    if(data->set.ssl_enable_alpn) {
-      static const char* protocols[] = {
-        NGHTTP2_PROTO_VERSION_ID, ALPN_HTTP_1_1, NULL
-      };
-      mbedtls_ssl_conf_alpn_protocols(&connssl->config, protocols);
-      infof(data, "ALPN, offering %s, %s\n", protocols[0],
-            protocols[1]);
+  if(data->set.ssl_enable_alpn) {
+    const char **p = &connssl->protocols[0];
+#ifdef USE_NGHTTP2
+    if(data->set.httpversion >= CURL_HTTP_VERSION_2)
+      *p++ = NGHTTP2_PROTO_VERSION_ID;
+#endif
+    *p++ = ALPN_HTTP_1_1;
+    *p = NULL;
+    /* this function doesn't clone the protocols array, which is why we need
+       to keep it around */
+    if(mbedtls_ssl_conf_alpn_protocols(&connssl->config,
+                                       &connssl->protocols[0])) {
+      failf(data, "Failed setting ALPN protocols");
+      return CURLE_SSL_CONNECT_ERROR;
     }
+    for(p = &connssl->protocols[0]; *p; ++p)
+      infof(data, "ALPN, offering %s\n", *p);
   }
 #endif
 
@@ -397,12 +433,12 @@ mbedtls_connect_step1(struct connectdata *conn,
 
 static CURLcode
 mbedtls_connect_step2(struct connectdata *conn,
-                     int sockindex)
+                      int sockindex)
 {
   int ret;
   struct SessionHandle *data = conn->data;
   struct ssl_connect_data* connssl = &conn->ssl[sockindex];
-  char buffer[1024];
+  const mbedtls_x509_crt *peercert;
 
 #ifdef HAS_ALPN
   const char* next_protocol;
@@ -457,29 +493,92 @@ mbedtls_connect_step2(struct connectdata *conn,
     return CURLE_PEER_FAILED_VERIFICATION;
   }
 
-  if(mbedtls_ssl_get_peer_cert(&(connssl->ssl))) {
-    /* If the session was resumed, there will be no peer certs */
-    memset(buffer, 0, sizeof(buffer));
+  peercert = mbedtls_ssl_get_peer_cert(&connssl->ssl);
 
-    if(mbedtls_x509_crt_info(buffer, sizeof(buffer), (char *)"* ",
-                     mbedtls_ssl_get_peer_cert(&(connssl->ssl))) != -1)
+  if(peercert && data->set.verbose) {
+    const size_t bufsize = 16384;
+    char *buffer = malloc(bufsize);
+
+    if(!buffer)
+      return CURLE_OUT_OF_MEMORY;
+
+    if(mbedtls_x509_crt_info(buffer, bufsize, "* ", peercert) > 0)
       infof(data, "Dumping cert info:\n%s\n", buffer);
+    else
+      infof(data, "Unable to dump certificate information.\n");
+
+    free(buffer);
+  }
+
+  if(data->set.str[STRING_SSL_PINNEDPUBLICKEY]) {
+    int size;
+    CURLcode result;
+    mbedtls_x509_crt *p;
+    unsigned char pubkey[PUB_DER_MAX_BYTES];
+
+    if(!peercert || !peercert->raw.p || !peercert->raw.len) {
+      failf(data, "Failed due to missing peer certificate");
+      return CURLE_SSL_PINNEDPUBKEYNOTMATCH;
+    }
+
+    p = calloc(1, sizeof(*p));
+
+    if(!p)
+      return CURLE_OUT_OF_MEMORY;
+
+    mbedtls_x509_crt_init(p);
+
+    /* Make a copy of our const peercert because mbedtls_pk_write_pubkey_der
+       needs a non-const key, for now.
+       https://github.com/ARMmbed/mbedtls/issues/396 */
+    if(mbedtls_x509_crt_parse_der(p, peercert->raw.p, peercert->raw.len)) {
+      failf(data, "Failed copying peer certificate");
+      mbedtls_x509_crt_free(p);
+      free(p);
+      return CURLE_SSL_PINNEDPUBKEYNOTMATCH;
+    }
+
+    size = mbedtls_pk_write_pubkey_der(&p->pk, pubkey, PUB_DER_MAX_BYTES);
+
+    if(size <= 0) {
+      failf(data, "Failed copying public key from peer certificate");
+      mbedtls_x509_crt_free(p);
+      free(p);
+      return CURLE_SSL_PINNEDPUBKEYNOTMATCH;
+    }
+
+    /* mbedtls_pk_write_pubkey_der writes data at the end of the buffer. */
+    result = Curl_pin_peer_pubkey(data,
+                                  data->set.str[STRING_SSL_PINNEDPUBLICKEY],
+                                  &pubkey[PUB_DER_MAX_BYTES - size], size);
+    if(result) {
+      mbedtls_x509_crt_free(p);
+      free(p);
+      return result;
+    }
+
+    mbedtls_x509_crt_free(p);
+    free(p);
   }
 
 #ifdef HAS_ALPN
   if(data->set.ssl_enable_alpn) {
     next_protocol = mbedtls_ssl_get_alpn_protocol(&connssl->ssl);
 
-    if(next_protocol != NULL) {
+    if(next_protocol) {
       infof(data, "ALPN, server accepted to use %s\n", next_protocol);
-
-      if(strncmp(next_protocol, NGHTTP2_PROTO_VERSION_ID,
-                  NGHTTP2_PROTO_VERSION_ID_LEN)) {
-        conn->negnpn = CURL_HTTP_VERSION_2_0;
+#ifdef USE_NGHTTP2
+      if(!strncmp(next_protocol, NGHTTP2_PROTO_VERSION_ID,
+                  NGHTTP2_PROTO_VERSION_ID_LEN) &&
+         !next_protocol[NGHTTP2_PROTO_VERSION_ID_LEN]) {
+        conn->negnpn = CURL_HTTP_VERSION_2;
       }
-      else if(strncmp(next_protocol, ALPN_HTTP_1_1, ALPN_HTTP_1_1_LENGTH)) {
-        conn->negnpn = CURL_HTTP_VERSION_1_1;
-      }
+      else
+#endif
+        if(!strncmp(next_protocol, ALPN_HTTP_1_1, ALPN_HTTP_1_1_LENGTH) &&
+           !next_protocol[ALPN_HTTP_1_1_LENGTH]) {
+          conn->negnpn = CURL_HTTP_VERSION_1_1;
+        }
     }
     else {
       infof(data, "ALPN, server did not agree to a protocol\n");
@@ -495,7 +594,7 @@ mbedtls_connect_step2(struct connectdata *conn,
 
 static CURLcode
 mbedtls_connect_step3(struct connectdata *conn,
-                     int sockindex)
+                      int sockindex)
 {
   CURLcode retcode = CURLE_OK;
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
@@ -523,7 +622,7 @@ mbedtls_connect_step3(struct connectdata *conn,
              sizeof(mbedtls_ssl_session));
 
       retcode = Curl_ssl_addsessionid(conn, new_session,
-                                   sizeof(mbedtls_ssl_session));
+                                      sizeof(mbedtls_ssl_session));
     }
     else {
       retcode = CURLE_OUT_OF_MEMORY;
@@ -541,15 +640,15 @@ mbedtls_connect_step3(struct connectdata *conn,
 }
 
 static ssize_t mbedtls_send(struct connectdata *conn,
-                             int sockindex,
-                             const void *mem,
-                             size_t len,
-                             CURLcode *curlcode)
+                            int sockindex,
+                            const void *mem,
+                            size_t len,
+                            CURLcode *curlcode)
 {
   int ret = -1;
 
   ret = mbedtls_ssl_write(&conn->ssl[sockindex].ssl,
-                  (unsigned char *)mem, len);
+                          (unsigned char *)mem, len);
 
   if(ret < 0) {
     *curlcode = (ret == MBEDTLS_ERR_SSL_WANT_WRITE) ?
@@ -567,18 +666,23 @@ void Curl_mbedtls_close_all(struct SessionHandle *data)
 
 void Curl_mbedtls_close(struct connectdata *conn, int sockindex)
 {
-  /* mbedtls_rsa_free(&conn->ssl[sockindex].rsa); */
+  mbedtls_pk_free(&conn->ssl[sockindex].pk);
   mbedtls_x509_crt_free(&conn->ssl[sockindex].clicert);
   mbedtls_x509_crt_free(&conn->ssl[sockindex].cacert);
   mbedtls_x509_crl_free(&conn->ssl[sockindex].crl);
+  mbedtls_ssl_config_free(&conn->ssl[sockindex].config);
   mbedtls_ssl_free(&conn->ssl[sockindex].ssl);
+  mbedtls_ctr_drbg_free(&conn->ssl[sockindex].ctr_drbg);
+#ifndef THREADING_SUPPORT
+  mbedtls_entropy_free(&conn->ssl[sockindex].entropy);
+#endif /* THREADING_SUPPORT */
 }
 
 static ssize_t mbedtls_recv(struct connectdata *conn,
-                             int num,
-                             char *buf,
-                             size_t buffersize,
-                             CURLcode *curlcode)
+                            int num,
+                            char *buf,
+                            size_t buffersize,
+                            CURLcode *curlcode)
 {
   int ret = -1;
   ssize_t len = -1;
@@ -615,9 +719,9 @@ size_t Curl_mbedtls_version(char *buffer, size_t size)
 
 static CURLcode
 mbedtls_connect_common(struct connectdata *conn,
-                        int sockindex,
-                        bool nonblocking,
-                        bool *done)
+                       int sockindex,
+                       bool nonblocking,
+                       bool *done)
 {
   CURLcode retcode;
   struct SessionHandle *data = conn->data;
@@ -727,8 +831,8 @@ mbedtls_connect_common(struct connectdata *conn,
 
 CURLcode
 Curl_mbedtls_connect_nonblocking(struct connectdata *conn,
-                                int sockindex,
-                                bool *done)
+                                 int sockindex,
+                                 bool *done)
 {
   return mbedtls_connect_common(conn, sockindex, TRUE, done);
 }
@@ -736,7 +840,7 @@ Curl_mbedtls_connect_nonblocking(struct connectdata *conn,
 
 CURLcode
 Curl_mbedtls_connect(struct connectdata *conn,
-                    int sockindex)
+                     int sockindex)
 {
   CURLcode retcode;
   bool done = FALSE;
